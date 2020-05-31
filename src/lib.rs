@@ -18,7 +18,9 @@ const ABOUT :&str = "(WIP) File-based management for Edgewall Software's Trac ti
 pub struct Config {
     trac_user: String,
     trac_pass: String,
-    // url_rpc: String,
+    url_rpc_arg: bool,
+    url_rpc: String, // priority: arg (--url-rpc) > "url_rpc" in file
+    interactive: bool,
 }
 
 // TODO: move to main.rs?
@@ -44,8 +46,14 @@ pub fn main() {
                 .required(true)
                 .help("Password for Trac"),
         )
+        .arg(
+            clap::Arg::with_name("url_rpc")
+                .long("url-rpc")
+                .value_name("URL_RPC")
+                .takes_value(true)
+                .help("http://<trac url>/login/rpc; You can also set it as \"url_rpc\" in the Wiki header"),
+        )
         // TODO: -q -vv
-        // TODO: url_rpc
         // TODO: comment (effective only on update)
         .arg(
             clap::Arg::with_name("FILE")
@@ -59,6 +67,7 @@ pub fn main() {
     // println!("{:#?}", arg_matches);
 
     let mut config = Config {
+        interactive: true,
         ..Default::default()
     };
 
@@ -74,6 +83,10 @@ pub fn main() {
         .to_str()
         .unwrap()
         .to_string();
+    if let Some(x) = arg_matches.value_of_os("url_rpc") {
+        config.url_rpc_arg = true;
+        config.url_rpc = x.to_str().unwrap().to_string();
+    }
     let path = arg_matches
         .value_of_os("FILE")
         .unwrap()
@@ -89,7 +102,7 @@ pub fn main() {
             return;
         }
     };
-    let tmp = post(config, &txt);
+    let tmp = post(&config, &txt);
     // TODO: panic only on my errors
     let _breakpoint = 1;
 }
@@ -97,9 +110,9 @@ pub fn main() {
 // -------------------------------------------------------------------------------------------------
 // api
 
-pub fn post(config: Config, txt: &str) -> Result<(), failure::Error> {
-    let poster = txt_to_poster(txt)?;
-    poster.post()?;
+pub fn post(config: &Config, txt: &str) -> Result<(), failure::Error> {
+    let poster = txt_to_poster(config, txt)?;
+    poster.post(&config)?;
     Ok(())
 }
 
@@ -111,9 +124,9 @@ pub fn post(config: Config, txt: &str) -> Result<(), failure::Error> {
 type Header = HashMap<String, (i32, String)>;
 
 trait Poster {
-    fn post(&self) -> Result<(), failure::Error>;
+    fn post(&self, config: &Config) -> Result<(), failure::Error>;
 
-    fn post_json(&self, url_rpc: &str, json: &serde_json::Value) -> Result<(), failure::Error> {
+    fn post_json(&self, config: &Config, json: &serde_json::Value) -> Result<(), failure::Error> {
         // TODO: short log
         debug!("{}", json.to_string());
 
@@ -123,7 +136,7 @@ trait Poster {
 
         let client = reqwest::Client::new();
         let mut res = client
-            .post(url_rpc)
+            .post(&config.url_rpc)
             .basic_auth(user, Some(pass))
             .json(&json)
             .send()?;
@@ -161,7 +174,7 @@ struct PostDataCreate {
 }
 
 impl Poster for PostDataCreate {
-    fn post(&self) -> Result<(), failure::Error> {
+    fn post(&self, config: &Config) -> Result<(), failure::Error> {
         let json = serde_json::json!({
             "method": "ticket.create",
             "params": [
@@ -173,7 +186,7 @@ impl Poster for PostDataCreate {
             ],
         });
 
-        let tmp = self.post_json(&self.post_data.url_rpc, &json)?;
+        let tmp = self.post_json(config, &json)?;
 
         // TODO: re-get, warn ignored like foo:bar
 
@@ -193,7 +206,34 @@ struct PostDataUpdate {
 }
 
 impl Poster for PostDataUpdate {
-    fn post(&self) -> Result<(), failure::Error> {
+    fn post(&self, config: &Config) -> Result<(), failure::Error> {
+        let json = serde_json::json!({
+            "method": "ticket.get",
+            "params": [ self.id ],
+        });
+
+        // TODO: short log
+        debug!("GET");
+        debug!("{}", json.to_string());
+
+        let client = reqwest::Client::new();
+        let mut res = client
+            .post(&config.url_rpc)
+            .basic_auth(&config.trac_user, Some(&config.trac_pass))
+            .json(&json)
+            .send()?;
+
+        // TODO
+        // match res.status() {
+        // }
+
+        match res.text() {
+            Ok(x) => {
+                info!("{}", x);
+            }
+            Err(x) => warn!("invalid response json: {}", x),
+        }
+
         let json = serde_json::json!({
             "method": "ticket.update",
             "params": [
@@ -206,7 +246,7 @@ impl Poster for PostDataUpdate {
             ],
         });
 
-        let tmp = self.post_json(&self.post_data.url_rpc, &json);
+        let tmp = self.post_json(config, &json);
 
         // TODO: check result
         //   {"error": {"message": "ServiceException details : no such column: foo", "code": -32603,
@@ -219,12 +259,12 @@ impl Poster for PostDataUpdate {
 // -------------------------------------------------------------------------------------------------
 // txt
 
-fn txt_to_poster(txt: &str) -> Result<Box<dyn Poster>, failure::Error> {
+fn txt_to_poster(config: &Config, txt: &str) -> Result<Box<dyn Poster>, failure::Error> {
     let (mut header, _linenum_body) = parse_header(txt)?;
     if let Some(x) = header.remove("description") {
         warn!("line {}: \"description\" is reserved key; ignored", x.0);
     }
-    header_to_poster(header, txt)
+    header_to_poster(config, header, txt)
 }
 
 // Returns Header and the line-number of the beginning of the body
@@ -278,7 +318,25 @@ fn parse_kv(i_line: usize, line: &str) -> Result<(&str, &str), failure::Error> {
     Ok((key, val))
 }
 
-fn header_to_poster(mut header: Header, txt: &str) -> Result<Box<dyn Poster>, failure::Error> {
+fn header_to_poster(
+    config: &Config,
+    mut header: Header,
+    txt: &str,
+) -> Result<Box<dyn Poster>, failure::Error> {
+    // TODO: line-number-sequential logging
+    if let Some(x) = header.remove("url_rpc") {
+        if config.url_rpc_arg {
+            info!(
+                "line {}: \"url_rpc\" is ignored since --url-rpc={} is given",
+                x.0, config.url_rpc
+            );
+        }
+    } else {
+        if !config.url_rpc_arg {
+            ret_e!("please set --url-rpc");
+        }
+    }
+
     for key in ["id", "url"].iter() {
         if let Some(x) = header.get(*key) {
             if x.1.is_empty() {
@@ -369,18 +427,9 @@ fn header_to_post_data(header: &mut Header) -> Result<PostData, failure::Error> 
         notify: false, // TODO
         ..Default::default()
     };
-
-    data.url_rpc = match header.remove("url_rpc") {
-        None => {
-            ret_e!("please set \"url_rpc: <URL>\"");
-        }
-        Some(x) => x.1,
-    };
-
     for (key, (_i_line, val)) in header {
         data.attributes.insert(key.to_string(), val.to_string());
     }
-
     Ok(data)
 }
 
@@ -403,6 +452,9 @@ mod tests {
         crate::Config {
             trac_user: "wsh".to_string(),
             trac_pass: "1".to_string(),
+            url_rpc_arg: false,
+            url_rpc: "http://localhost:8000/login/rpc".to_string(),
+            interactive: false,
         }
     }
 
@@ -436,7 +488,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
         // TODO
         let _breakpoint = 1;
     }
@@ -470,7 +522,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
         let txt = textwrap::dedent(
             &r"
             {{{
@@ -493,7 +545,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
         let _breakpoint = 1;
     }
 
@@ -510,7 +562,7 @@ mod tests {
             #!comment
             }}}"[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
 
         // missing colong
         let txt = textwrap::dedent(
@@ -520,7 +572,7 @@ mod tests {
             missing colon
             }}}"[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
 
         // duplicate
         let txt = textwrap::dedent(
@@ -531,7 +583,7 @@ mod tests {
             key1: val2
             }}}"[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
 
         // no url
         let txt = textwrap::dedent(
@@ -540,7 +592,7 @@ mod tests {
             #!comment
             }}}"[1..],
         );
-        let tmp = crate::post(config(), &txt);
+        let tmp = crate::post(&config(), &txt);
 
         let _breakpoint = 1;
     }
