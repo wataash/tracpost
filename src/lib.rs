@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)]
-#![allow(unused_macros)]
-#![allow(unused_variables)]
-
 use std::collections::HashMap;
 
 #[macro_use]
@@ -13,9 +9,105 @@ mod utils;
 //   when create: commment='update foo' is ignored on create
 
 // -------------------------------------------------------------------------------------------------
+// cli
+
+// https://github.com/wataash/tracpost
+const ABOUT :&str = "(WIP) File-based management for Edgewall Software's Trac tickets -- create, update tickets by editing local files";
+
+#[derive(Debug, Default)]
+pub struct Config {
+    trac_user: String,
+    trac_pass: String,
+    // url_rpc: String,
+}
+
+// TODO: move to main.rs?
+pub fn main() {
+    let arg_matches = clap::App::new("tracpost")
+        .version("0.1.0")
+        .about(ABOUT)
+        .arg(
+            clap::Arg::with_name("trac_user")
+                .long("trac-user")
+                .value_name("TRAC_USER")
+                .takes_value(true)
+                .env("TRAC_USER")
+                .required(true)
+                .help("Username on Trac"),
+        )
+        .arg(
+            clap::Arg::with_name("trac_pass")
+                .long("trac-pass")
+                .value_name("TRAC_PASS")
+                .takes_value(true)
+                .env("TRAC_PASS")
+                .required(true)
+                .help("Password for Trac"),
+        )
+        // TODO: -q -vv
+        // TODO: url_rpc
+        // TODO: comment (effective only on update)
+        .arg(
+            clap::Arg::with_name("FILE")
+                .index(1)
+                .required(true)
+                .help("Path to TracWiki (MoinMoin) file"),
+        )
+        .get_matches();
+
+    // println!("{:?}", arg_matches);
+    // println!("{:#?}", arg_matches);
+
+    let mut config = Config {
+        ..Default::default()
+    };
+
+    config.trac_user = arg_matches
+        .value_of_os("trac_user")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    config.trac_pass = arg_matches
+        .value_of_os("trac_pass")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let path = arg_matches
+        .value_of_os("FILE")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    debug!("config: {:#?}", config);
+
+    let txt = match std::fs::read_to_string(&path) {
+        Ok(x) => x,
+        Err(error) => {
+            error!("failed to read {}: {}", path, error);
+            return;
+        }
+    };
+    let tmp = post(config, &txt);
+    // TODO: panic only on my errors
+    let _breakpoint = 1;
+}
+
+// -------------------------------------------------------------------------------------------------
+// api
+
+pub fn post(config: Config, txt: &str) -> Result<(), failure::Error> {
+    let poster = txt_to_poster(txt)?;
+    poster.post()?;
+    Ok(())
+}
+
+// -------------------------------------------------------------------------------------------------
 // post
 
 // key - (line, value)
+// TODO: avoid magic: .0 .1; name it
 type Header = HashMap<String, (i32, String)>;
 
 trait Poster {
@@ -50,7 +142,6 @@ trait Poster {
     }
 }
 
-// TODO: String?
 #[derive(Default)]
 struct PostData {
     url_rpc: String,
@@ -84,7 +175,7 @@ impl Poster for PostDataCreate {
 
         let tmp = self.post_json(&self.post_data.url_rpc, &json)?;
 
-        // TODO: check result
+        // TODO: re-get, warn ignored like foo:bar
 
         Ok(())
     }
@@ -187,18 +278,26 @@ fn parse_kv(i_line: usize, line: &str) -> Result<(&str, &str), failure::Error> {
     Ok((key, val))
 }
 
-fn header_to_poster(kvs: Header, txt: &str) -> Result<Box<dyn Poster>, failure::Error> {
-    if kvs.contains_key("id") || kvs.contains_key("url") {
-        return Ok(Box::new(header_to_post_data_update(kvs, txt)?));
+fn header_to_poster(mut header: Header, txt: &str) -> Result<Box<dyn Poster>, failure::Error> {
+    for key in ["id", "url"].iter() {
+        if let Some(x) = header.get(*key) {
+            if x.1.is_empty() {
+                info!("line {}: \"{}\" is empty; ignores it", x.0, key);
+                header.remove(*key);
+            }
+        }
     }
-    Ok(Box::new(header_to_post_data_create(kvs, txt)?))
+    if header.contains_key("id") || header.contains_key("url") {
+        return Ok(Box::new(header_to_post_data_update(header, txt)?));
+    }
+    Ok(Box::new(header_to_post_data_create(header, txt)?))
 }
 
 fn header_to_post_data_create(
-    mut kvs: Header,
+    mut header: Header,
     txt: &str,
 ) -> Result<PostDataCreate, failure::Error> {
-    let summary = match kvs.remove("summary") {
+    let summary = match header.remove("summary") {
         None => {
             ret_e!("please set \"summary: <summary>\"");
         }
@@ -206,7 +305,7 @@ fn header_to_post_data_create(
     };
 
     Ok(PostDataCreate {
-        post_data: header_to_post_data(&mut kvs)?,
+        post_data: header_to_post_data(&mut header)?,
         summary,
         description: txt.to_string(),
         ..Default::default()
@@ -214,15 +313,15 @@ fn header_to_post_data_create(
 }
 
 fn header_to_post_data_update(
-    mut kvs: Header,
+    mut header: Header,
     txt: &str,
 ) -> Result<PostDataUpdate, failure::Error> {
-    if !kvs.contains_key("id") && !kvs.contains_key("url") {
+    if !header.contains_key("id") && !header.contains_key("url") {
         ret_e!("BUG: id or url not set")
     }
-    if kvs.contains_key("id") && kvs.contains_key("url") {
+    if header.contains_key("id") && header.contains_key("url") {
         warn!("both \"id\" and \"url\" is set; ignores \"url\"");
-        kvs.remove("url");
+        header.remove("url");
     }
 
     // TODO: cleanup
@@ -231,25 +330,32 @@ fn header_to_post_data_update(
         ..Default::default()
     };
 
-    if kvs.contains_key("url") {
+    if header.contains_key("url") {
         ret_e!("TODO: url");
-        // kvs.remove("url");
+        // header.remove("url");
     }
 
-    // data.id = kvs.remove("id").unwrap().1.into(); // TODO: if invalid number
-    let tmp = kvs.remove("id").unwrap().1; // TODO: if invalid number
-    data.id = match tmp.parse() {
-        Ok(x) => x,
-        Err(x) => {
-            ret_e!("TODO");
-        }
-    };
+    let id = header.remove("id").unwrap(); // TODO: error handling
+    if id.1.is_empty() {
+        info!("line {}: \"id\" is empty; create new ticket", id.0);
+    } else {
+        info!(
+            "line {}: \"id\" is empty ({}); create new ticket",
+            id.0, id.1
+        );
+        data.id = match id.1.parse() {
+            Ok(x) => x,
+            Err(x) => {
+                ret_e!("TODO {}", x);
+            }
+        };
+    }
 
-    if let Some(x) = kvs.remove("comment") {
+    if let Some(x) = header.remove("comment") {
         data.comment = x.1;
     }
 
-    data.post_data = header_to_post_data(&mut kvs)?;
+    data.post_data = header_to_post_data(&mut header)?;
 
     data.post_data
         .attributes
@@ -258,45 +364,24 @@ fn header_to_post_data_update(
     Ok(data)
 }
 
-fn header_to_post_data(kvs: &mut Header) -> Result<PostData, failure::Error> {
+fn header_to_post_data(header: &mut Header) -> Result<PostData, failure::Error> {
     let mut data = PostData {
         notify: false, // TODO
         ..Default::default()
     };
 
-    data.url_rpc = match kvs.remove("url_rpc") {
+    data.url_rpc = match header.remove("url_rpc") {
         None => {
             ret_e!("please set \"url_rpc: <URL>\"");
         }
         Some(x) => x.1,
     };
 
-    for (key, (_i_line, val)) in kvs {
+    for (key, (_i_line, val)) in header {
         data.attributes.insert(key.to_string(), val.to_string());
     }
 
     Ok(data)
-}
-
-// -------------------------------------------------------------------------------------------------
-// api
-
-pub fn post(txt: &str) -> Result<(), failure::Error> {
-    let poster = txt_to_poster(txt)?;
-    poster.post()?;
-    Ok(())
-}
-
-// -------------------------------------------------------------------------------------------------
-// main
-
-// TODO: move to main.rs
-// TODO: clap
-
-pub fn main() {
-    // let tmp = post(&txt);
-    // TODO
-    let _breakpoint = 1;
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -309,6 +394,17 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     // TODO: concat tests: create -> update
+
+    // const config: crate::Config = crate::Config {
+    //     trac_user: "wsh".to_string(),
+    //     trac_pass: "1".to_string(),
+    // };
+    fn config() -> crate::Config {
+        crate::Config {
+            trac_user: "wsh".to_string(),
+            trac_pass: "1".to_string(),
+        }
+    }
 
     // TOOD: test only if trac available
     #[test]
@@ -340,7 +436,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
         // TODO
         let _breakpoint = 1;
     }
@@ -374,7 +470,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
         let txt = textwrap::dedent(
             &r"
             {{{
@@ -397,7 +493,7 @@ mod tests {
             test
             "[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
         let _breakpoint = 1;
     }
 
@@ -414,7 +510,7 @@ mod tests {
             #!comment
             }}}"[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
 
         // missing colong
         let txt = textwrap::dedent(
@@ -424,7 +520,7 @@ mod tests {
             missing colon
             }}}"[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
 
         // duplicate
         let txt = textwrap::dedent(
@@ -435,7 +531,7 @@ mod tests {
             key1: val2
             }}}"[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
 
         // no url
         let txt = textwrap::dedent(
@@ -444,7 +540,7 @@ mod tests {
             #!comment
             }}}"[1..],
         );
-        let tmp = crate::post(&txt);
+        let tmp = crate::post(config(), &txt);
 
         let _breakpoint = 1;
     }

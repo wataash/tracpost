@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// https://github.com/wataash/scraps_rs/blob/28e57bf/src/lib.rs
+// https://github.com/wataash/scraps_rs/blob/c5bfd09/src/lib.rs
 
 // -------------------------------------------------------------------------------------------------
 /// # logger
