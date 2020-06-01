@@ -3,21 +3,54 @@
 // https://github.com/wataash/scraps_rs/blob/c5bfd09/src/lib.rs
 
 // -------------------------------------------------------------------------------------------------
-/// # logger
+/// # 0 macros
 
+#[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => (crate::utils::_log(crate::utils::_LogLevel::Error, file!(), line!(), format_args!($($arg)*));)
 }
+#[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => (crate::utils::_log(crate::utils::_LogLevel::Warn, file!(), line!(), format_args!($($arg)*));)
 }
+#[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => (crate::utils::_log(crate::utils::_LogLevel::Info, file!(), line!(), format_args!($($arg)*));)
 }
+#[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => (crate::utils::_log(crate::utils::_LogLevel::Debug, file!(), line!(), format_args!($($arg)*));)
 }
 
+macro_rules! ret_e {
+    // ref: failure-0.1.8/src/macros.rs bail!
+    ($($arg:tt)*) => {
+        return Err(crate::utils::_err(file!(), line!(), format_args!($($arg)*)))
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+/// # io
+
+pub(crate) fn y_n(prompt: &str) -> Result<(), failure::Error> {
+    info!("{} (y/N)", prompt);
+    let mut s = String::new();
+    let _len = std::io::stdin()
+        .read_line(&mut s)
+        .expect("unexpected input"); // XXX
+    s = s.trim().to_lowercase();
+    if !(s == "y" || s == "yes") {
+        return Err(failure::format_err!("canceled"));
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------------------------------------------
+/// # logger
+
+// TODO: https://doc.rust-lang.org/edition-guide/rust-2018/macros/macro-changes.html
+
+#[allow(dead_code)]
 #[doc(hidden)]
 pub(crate) enum _LogLevel {
     Error,
@@ -38,13 +71,6 @@ pub(crate) fn _log(
         _LogLevel::Warn => eprintln!("[W] \x1b[33m{}:{} {}\x1b[0m", file, line, args),
         _LogLevel::Info => eprintln!("[I] \x1b[34m{}:{} {}\x1b[0m", file, line, args),
         _LogLevel::Debug => eprintln!("[D] \x1b[37m{}:{} {}\x1b[0m", file, line, args),
-    }
-}
-
-macro_rules! ret_e {
-    // ref: failure-0.1.8/src/macros.rs bail!
-    ($($arg:tt)*) => {
-        return Err(crate::utils::_err(file!(), line!(), format_args!($($arg)*)))
     }
 }
 
@@ -79,22 +105,6 @@ pub(crate) fn _err(file: &str, line: u32, args: std::fmt::Arguments) -> failure:
 
 // -------------------------------------------------------------------------------------------------
 /// # string
-
-pub(crate) fn from_line_n(s: &str, n: usize) -> Option<&str> {
-    if n == 0 {
-        return Some(s);
-    }
-    let mut m = 0;
-    for (i, c) in s.char_indices() {
-        if c == '\n' {
-            m += 1;
-            if m == n {
-                return Some(&s[i + 1..]);
-            }
-        }
-    }
-    None
-}
 
 pub(crate) fn partial_str(s: &str, width: usize) -> String {
     if s.len() <= width {
